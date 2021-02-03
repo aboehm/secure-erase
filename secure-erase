@@ -1,0 +1,142 @@
+#!/bin/bash
+
+# Secure erase SSDs and HDDs 
+# Copyright (C) 2021 Alexander Böhm <alexander.boehm@malbolge.net>
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# This script inspired by
+# https://www.thomas-krenn.com/de/wiki/SSD_Secure_Erase
+
+# Exit instantly on bad return code
+set -e
+
+export LC_ALL=C
+DEVICE=""
+LOG_SERVER=""
+DO_ERASE=0
+
+### functions
+
+show_help() {
+      echo "Secure erase a device"
+      echo "Copyright: 2021, Alexander Böhm <alexander.boehm@malbolge.net>"
+      echo "License  : AGPL-3.0"
+      echo ""
+      echo "Syntax: $0 -d <DEVICE> [-Y]"
+      echo ""
+      echo "    -d <DEVICE>    Device to use"
+      echo ""
+      echo "    -Y             Erase device. Without a basic check and some"
+      echo "                   status information will be display."
+      echo ""
+      echo "    -L <URL>       Log device status as JSON via HTTP-POST to URL"
+      echo ""
+      echo "WARNING: All your data could be destroy! Know what you're doing!"
+      echo ""
+}
+
+log_status() {
+  if [ "$LOG_SERVER" ] ; then
+    curl -XPOST $LOG_SERVER -d "{\"model\":\"$MODEL_NAME\",\"serial number\":\"$SERIAL_NUMBER\",\"firmware\":\"$FIRMWARE\",\"status\":\"$1\"}"
+  else
+    echo "Device '$DEVICE' ($MODEL_NAME, $SERIAL_NUMBER, Firmware $FIRMWARE): $1"
+  fi
+}
+
+### arguments parsing and check
+
+while getopts "d:L:Y" OPT; do
+  case $OPT in
+    d)
+      if ! [ -b "$OPTARG" ] ; then
+        echo "Device $OPTARG isn't a valid block device!"
+        exit 1
+      fi
+      DEVICE=$OPTARG
+      ;;
+    Y)
+      DO_ERASE=1
+      ;;
+    L)
+      LOG_SERVER="$OPTARG"
+      ;;
+    *)
+      show_help
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z $DEVICE ] ; then
+  show_help
+  exit 1
+fi
+
+### check for required programs
+
+PRORGRAMS="hdparm shred curl"
+
+for prog in $PRORGRAMS ; do
+  if [ -z "`which $prog`" ] ; then
+    echo "Can't locate $prog. Please install it."
+    exit 1
+  fi
+done
+
+### extract disc infos
+
+HDPARAM_OUT=`hdparm -I "$DEVICE"`
+
+# Gather device informations
+MODEL_NAME=`printf "$HDPARAM_OUT" |awk -F ':' '/Model Number:/      { sub(/^\s+/, "", $2); sub(/\s+$/,"", $2); print $2; }'`
+SERIAL_NUMBER=`printf "$HDPARAM_OUT" |awk -F ':' '/Serial Number:/     { sub(/^\s+/, "", $2); sub(/\s+$/,"", $2); print $2; }'`
+FIRMWARE=`printf "$HDPARAM_OUT" |awk -F ':' '/Firmware Revision:/ { sub(/^\s+/, "", $2); sub(/\s+$/,"", $2); print $2; }'`
+
+### check disk
+
+# check frozen state
+if ! [ "`printf "$HDPARAM_OUT" |grep 'not.*frozen'`" ] ; then
+  echo "Device $DEVICE is frozen. Please reboot or disconnect and reconnect disk and try it again."
+  log_status frozen
+  exit 2
+fi
+
+# check locked
+if ! [ "`printf "$HDPARAM_OUT" |grep 'not.*locked'`" ] ; then
+  echo "Device $DEVICE is locked. Please remove lock and try it again."
+  log_status locked
+  exit 2
+fi
+
+# check enabled security
+if ! [ "`printf "$HDPARAM_OUT" |grep 'not.*enabled'`" ] ; then
+  echo "Device $DEVICE is secured. Please free device and try it again."
+  log_status enabled
+  exit 2
+fi
+
+### running erase
+
+if [ "x$DO_ERASE" = "x1" ] ; then
+  log_status 'setting credentials'
+  hdparm --user-master u --security-set-pass erase $DEVICE
+  log_status 'secure erasing'
+  hdparm --user-master u --security-erase erase $DEVICE
+  log_status 'secure erased'
+else
+  log_status free
+fi
+
+# vim: expandtab shiftwidth=2 tabstop=2
